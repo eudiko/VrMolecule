@@ -27,7 +27,7 @@ A VR application built in Unity 6 for Meta Quest where students can physically c
 
 1. Clone the repository
    ```
-   git clone https://github.com/YOURNAME/VR-MolecularChemLab.git
+   git clone https://github.com/eudiko/VrMolecule.git
    ```
 
 2. Open the project in Unity 6 via Unity Hub
@@ -48,12 +48,9 @@ A VR application built in Unity 6 for Meta Quest where students can physically c
    - Target Architecture: ARM64 only
    - Minimum API Level: 29
 
-6. Open the scene
+6. Open and play the scene
    - Assets → Scenes → ChemLab.unity
 
-7. Build the APK
-   - File → Build Settings → Build
-   - Install on Quest via: `adb install -r VR-MolecularChemLab.apk`
 
 ---
 
