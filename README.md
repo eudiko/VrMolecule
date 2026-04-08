@@ -1,6 +1,7 @@
 # VR Molecular Chemistry Lab
 
 A VR application built in Unity 6 for Meta Quest where students can physically combine atomic elements to form valid molecules using hand tracking.
+## THE PROJECT WAS MADE WITHOUT THE HELP OF ANY VR HARDWARE EQUIPMENT***
 
 ---
 
