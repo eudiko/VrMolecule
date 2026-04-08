@@ -7,18 +7,15 @@ using UnityEngine.XR.Interaction.Toolkit.Interactors;
 public enum AtomType { H, O, C, N }
 
 /// <summary>
-/// Robust VR atom controller.
+/// VR atom controller.
 ///
-/// GRAB  — Atom is re-parented to the interactor transform so it tracks
-///          the hand with zero lag and is always visible.
-///          Rigidbody is fully kinematic + interpolation disabled while held
-///          so there is no physics-lag on any axis.
+/// GRAB  : Lets XRI's Kinematic movement type handle world-space positioning.
+///         We only manage Rigidbody state (kinematic, velocity, damping) and
+///         a world-space offset baked into the atom's own attachTransform child.
 ///
-/// REST  — Gravity off, rotation frozen, high damping = atoms won't roll.
+/// REST  : Gravity off, rotation frozen, high damping → atoms stay put.
 ///
-/// BOND  — OverlapSphere with a generous radius fires after every release.
-///          Uses a per-instance list (not static) so concurrent checks don't
-///          trample each other. Prints verbose debug logs to the console.
+/// BOND  : BFS cluster search after each release; upgrades existing molecules.
 /// </summary>
 [RequireComponent(typeof(XRGrabInteractable))]
 [RequireComponent(typeof(Rigidbody))]
@@ -29,17 +26,18 @@ public class AtomController : MonoBehaviour
     [Header("Atom identity")]
     public AtomType atomType;
 
-    [Header("Grab — hand offset")]
-    [Tooltip("Local position relative to the controller attach point. " +
-             "Keep (0,0,0) so the atom sits exactly where the controller is.")]
-    [SerializeField] private Vector3 handPositionOffset = new Vector3(0f, 0f, 0.03f);
-    [SerializeField] private Vector3 handRotationOffset = Vector3.zero;
+    [Header("Grab — hold position")]
+    [Tooltip("Offset (in atom's LOCAL space) from the atom centre to the point\n" +
+             "that will align with the controller when held.\n" +
+             "Z > 0 pushes the atom FORWARD out of the hand.\n" +
+             "Z < 0 pulls it into the palm.\n" +
+             "Start at 0 and tweak if the atom clips into the controller mesh.")]
+    [SerializeField] private Vector3 attachLocalOffset = new Vector3(0f, 0f, 0f);
 
     [Header("Bond detection")]
-    [Tooltip("How far (metres) the OverlapSphere searches for neighbours. " +
-             "Increase this if bonding is unreliable in VR.")]
-    [SerializeField] private float    bondSearchRadius  = 0.30f;   // 30 cm — generous for VR
-    [SerializeField] private float    releaseToBondDelay = 0.10f;  // seconds
+    [Tooltip("Radius (metres) of the cluster search.")]
+    [SerializeField] private float    bondSearchRadius   = 0.30f;
+    [SerializeField] private float    releaseToBondDelay = 0.10f;
     [SerializeField] private LayerMask atomLayer         = ~0;
 
     [Header("Visual feedback")]
@@ -53,16 +51,15 @@ public class AtomController : MonoBehaviour
     [SerializeField] private bool  useGravityWhenResting = false;
     [SerializeField] private float restingLinearDamping  = 20f;
     [SerializeField] private float restingAngularDamping = 20f;
-    [Tooltip("Prevents atoms from rolling when not held.")]
+    [Tooltip("Freeze rotation so atoms don't roll.")]
     [SerializeField] private bool  freezeRotationAtRest  = true;
 
     // ── Private state ─────────────────────────────────────────────────────────
 
     private XRGrabInteractable _grab;
     private Rigidbody          _rb;
-    private Transform          _originalParent;
+    private GameObject         _attachChild;   // child that acts as our attach point
 
-    // Per-instance list — NOT static, so concurrent checks never share state.
     private readonly List<AtomController> _nearby = new();
 
     public bool IsGrabbed    { get; private set; }
@@ -75,10 +72,25 @@ public class AtomController : MonoBehaviour
         _grab = GetComponent<XRGrabInteractable>();
         _rb   = GetComponent<Rigidbody>();
 
-        // The toolkit doesn't touch position/rotation — we handle it via parenting.
+        // ── Create a child attach-point so XRI positions the atom correctly ───
+        // XRI aligns interactable.attachTransform ↔ interactor.attachTransform.
+        // By making our own child (offset by attachLocalOffset), we control
+        // exactly where on the atom the hand "holds" it — no coordinate-system
+        // confusion because XRI handles the maths in world space internally.
+        _attachChild = new GameObject("[AtomAttach]");
+        _attachChild.transform.SetParent(transform, worldPositionStays: false);
+        _attachChild.transform.localPosition = attachLocalOffset;
+        _attachChild.transform.localRotation = Quaternion.identity;
+        _grab.attachTransform = _attachChild.transform;
+
+        // ── XRI movement: Instantaneous ───────────────────────────────────────
+        // Instantaneous sets transform.position directly in Update (render rate).
+        // Kinematic uses Rigidbody.MovePosition in FixedUpdate (physics rate ~50Hz).
+        // In VR at 72-120 Hz, Kinematic causes visible jitter between physics steps.
+        // Instantaneous runs at render framerate → perfectly smooth.
         _grab.movementType     = XRBaseInteractable.MovementType.Instantaneous;
-        _grab.trackPosition    = false;
-        _grab.trackRotation    = false;
+        _grab.trackPosition    = true;
+        _grab.trackRotation    = true;
         _grab.throwOnDetach    = false;
         _grab.attachEaseInTime = 0f;
         _grab.smoothPosition   = false;
@@ -90,7 +102,6 @@ public class AtomController : MonoBehaviour
         if (atomRenderer == null)
             atomRenderer = GetComponentInChildren<Renderer>();
 
-        _originalParent = transform.parent;
         ApplyRestingPhysics();
     }
 
@@ -107,31 +118,23 @@ public class AtomController : MonoBehaviour
     {
         IsGrabbed = true;
         CancelInvoke(nameof(CheckBond));
-        BondManager.Instance?.CancelPendingForAtom(this);   // cancel any pending bond
+        BondManager.Instance?.CancelPendingForAtom(this);
 
+        // XRI will make the Rigidbody kinematic via Kinematic movement type.
+        // We also do it here immediately so there is no one-frame gap.
         if (_rb != null)
         {
             _rb.linearVelocity  = Vector3.zero;
             _rb.angularVelocity = Vector3.zero;
             _rb.isKinematic     = true;
             _rb.useGravity      = false;
-            _rb.constraints     = RigidbodyConstraints.None;
-            // Disable interpolation while kinematic — prevents one-frame lag.
             _rb.interpolation   = RigidbodyInterpolation.None;
+            _rb.constraints     = RigidbodyConstraints.None;
         }
 
-        // Parent atom to the interactor transform so it tracks with zero lag.
-        Transform attachPt = GetInteractorTransform(args);
-        if (attachPt != null)
-        {
-            transform.SetParent(attachPt, worldPositionStays: false);
-            transform.localPosition = handPositionOffset;   // (0,0,0) = at the hand
-            transform.localRotation = Quaternion.Euler(handRotationOffset);
-        }
-        else
-        {
-            Debug.LogWarning("[AtomController] Could not find interactor transform; atom may misplace.");
-        }
+        // Update the attach child's local offset in case it was tweaked at runtime.
+        if (_attachChild != null)
+            _attachChild.transform.localPosition = attachLocalOffset;
 
         SetColor(grabbedColor);
         AudioManager.Instance?.PlayGrab();
@@ -140,9 +143,6 @@ public class AtomController : MonoBehaviour
     private void OnReleased(SelectExitEventArgs args)
     {
         IsGrabbed = false;
-
-        // Detach from controller — world position is preserved.
-        transform.SetParent(_originalParent, worldPositionStays: true);
 
         if (_rb != null)
         {
@@ -153,7 +153,6 @@ public class AtomController : MonoBehaviour
 
         ApplyRestingPhysics();
         SetColor(defaultColor);
-
         Invoke(nameof(CheckBond), releaseToBondDelay);
     }
 
@@ -181,53 +180,37 @@ public class AtomController : MonoBehaviour
 
     // ── Bond detection ────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// BFS cluster search for free atoms, then a single-pass search for nearby
-    /// formed molecules.  Both are forwarded to BondManager so it can decide
-    /// whether to form a new molecule or upgrade an existing one.
-    /// </summary>
     private void CheckBond()
     {
         if (IsInMolecule) return;
 
         int layerMask = atomLayer.value == 0 ? ~0 : atomLayer.value;
 
-        // ── 1. BFS: collect all free, connected atoms ─────────────────────────
-        var cluster = new List<AtomController> { this };
+        // BFS: free atoms ─────────────────────────────────────────────────────
+        var cluster  = new List<AtomController> { this };
         var frontier = new Queue<AtomController>();
         frontier.Enqueue(this);
 
         while (frontier.Count > 0)
         {
             var current = frontier.Dequeue();
-
-            var hits = Physics.OverlapSphere(
-                current.transform.position, bondSearchRadius, layerMask,
-                QueryTriggerInteraction.Collide);
-
+            var hits    = Physics.OverlapSphere(current.transform.position,
+                              bondSearchRadius, layerMask, QueryTriggerInteraction.Collide);
             foreach (var col in hits)
             {
                 if (col.gameObject == current.gameObject) continue;
-
                 var other = col.GetComponentInParent<AtomController>();
-                if (other == null)           continue;
-                if (other.IsInMolecule)      continue;
-                if (other.IsGrabbed)         continue;
+                if (other == null || other.IsInMolecule || other.IsGrabbed) continue;
                 if (cluster.Contains(other)) continue;
-
                 cluster.Add(other);
                 frontier.Enqueue(other);
             }
         }
 
-        // ── 2. Single-pass: find nearby MoleculeInstance objects ──────────────
-        // Search from THIS atom with a slightly larger radius so the player just
-        // needs to hold the atom near the molecule, not at its exact centre.
+        // Single pass: nearby formed molecules ────────────────────────────────
         var nearbyMolecules = new List<MoleculeInstance>();
-        var molHits = Physics.OverlapSphere(
-            transform.position, bondSearchRadius * 1.5f, layerMask,
-            QueryTriggerInteraction.Collide);
-
+        var molHits = Physics.OverlapSphere(transform.position,
+                          bondSearchRadius * 1.5f, layerMask, QueryTriggerInteraction.Collide);
         foreach (var col in molHits)
         {
             var mol = col.GetComponentInParent<MoleculeInstance>();
@@ -235,18 +218,13 @@ public class AtomController : MonoBehaviour
                 nearbyMolecules.Add(mol);
         }
 
-        bool hasNeighbours   = cluster.Count >= 2;
-        bool hasMolNeighbour = nearbyMolecules.Count > 0;
-
-        if (!hasNeighbours && !hasMolNeighbour)
+        if (cluster.Count < 2 && nearbyMolecules.Count == 0)
         {
-            Debug.Log($"[AtomController] {name} — nothing nearby, no bond check.");
+            Debug.Log($"[AtomController] {name} — nothing nearby.");
             return;
         }
 
-        Debug.Log($"[AtomController] {name} — free cluster: {cluster.Count} atom(s), " +
-                  $"nearby molecules: {nearbyMolecules.Count}");
-
+        Debug.Log($"[AtomController] {name} — cluster:{cluster.Count} mols:{nearbyMolecules.Count}");
         foreach (var a in cluster) a.SetColor(proximityColor);
 
         _nearby.Clear();
@@ -254,22 +232,6 @@ public class AtomController : MonoBehaviour
             if (a != this) _nearby.Add(a);
 
         BondManager.Instance?.TryBond(this, _nearby, nearbyMolecules);
-    }
-
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private static Transform GetInteractorTransform(SelectEnterEventArgs args)
-    {
-        if (args?.interactorObject == null) return null;
-
-        if (args.interactorObject is XRBaseInteractor bi)
-            return bi.attachTransform != null ? bi.attachTransform : bi.transform;
-
-        if (args.interactorObject is MonoBehaviour mb)
-            return mb.transform;
-
-        return null;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -295,9 +257,8 @@ public class AtomController : MonoBehaviour
 
     public void ResetAtom()
     {
-        IsInMolecule = false;
+        IsInMolecule  = false;
         _grab.enabled = true;
-        transform.SetParent(_originalParent, worldPositionStays: true);
 
         if (_rb != null)
             _rb.isKinematic = false;
@@ -313,5 +274,8 @@ public class AtomController : MonoBehaviour
     {
         Gizmos.color = Color.cyan;
         Gizmos.DrawWireSphere(transform.position, bondSearchRadius);
+        // Show the attach point offset
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawWireSphere(transform.TransformPoint(attachLocalOffset), 0.01f);
     }
 }

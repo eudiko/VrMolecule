@@ -57,9 +57,14 @@ public class MoleculeDatabase : ScriptableObject
     {
         if (_sortedRecipes == null) return null;
 
+        // Guard: if no atoms are available at all, never match.
+        if (h == 0 && o == 0 && c == 0 && n == 0) return null;
+
         foreach (var r in _sortedRecipes)
         {
-            if (r.hydrogenCount  <= h &&
+            // Recipe must need at least 1 atom AND all counts must fit.
+            if (r.TotalAtoms > 0      &&
+                r.hydrogenCount  <= h &&
                 r.oxygenCount    <= o &&
                 r.carbonCount    <= c &&
                 r.nitrogenCount  <= n)

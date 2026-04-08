@@ -11,19 +11,18 @@ public class BondManager : MonoBehaviour
     [SerializeField] private Transform moleculeSpawnParent;
 
     [Header("Bonding behaviour")]
-    [Tooltip("How long (seconds) to wait after detecting a small match before " +
-             "actually forming it — gives the player time to add more atoms. " +
-             "Set to 0 to bond immediately.")]
+    [Tooltip("Seconds to wait after a SMALL recipe matches before locking it in. " +
+             "Gives the player time to add more atoms. 0 = instant.")]
     [SerializeField] private float pendingBondDelay = 1.2f;
 
     public event Action<MoleculeRecipe> OnMoleculeFormed;
-    public event Action OnMoleculeBroken;
+    public event Action                 OnMoleculeBroken;
 
-    private readonly HashSet<string>              _discovered  = new();
-    private readonly List<GameObject>             _activeMols  = new();
-    private readonly List<List<AtomController>>   _atomGroups  = new();
+    private readonly HashSet<string>            _discovered = new();
+    private readonly List<GameObject>           _activeMols = new();
+    private readonly List<List<AtomController>> _atomGroups = new();
 
-    // Pending coroutines keyed by the trigger atom so we can cancel/upgrade them.
+    // Pending coroutines keyed by trigger atom so they can be cancelled.
     private readonly Dictionary<AtomController, Coroutine> _pending = new();
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -44,57 +43,99 @@ public class BondManager : MonoBehaviour
     // ── Public API ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Called by AtomController after release.  Selects the BEST (most-atoms)
-    /// recipe that the current cluster satisfies, then either forms it immediately
-    /// (if it uses ALL atoms in the cluster) or starts a short pending window so
-    /// the player can add more atoms to beat a smaller sub-recipe.
+    /// Entry point from AtomController.CheckBond.
+    ///
+    /// Strategy (in priority order):
+    ///  1. UPGRADE  — Can free atoms + a nearby formed molecule make a BIGGER molecule?
+    ///               If yes, destroy the old molecule and spawn the new one immediately.
+    ///  2. NEW BOND  — Can free atoms alone make a molecule?
+    ///               If the recipe uses ALL atoms in the cluster → immediate.
+    ///               If it only uses a subset → start a pending delay so the player
+    ///               can add more atoms before we commit.
     /// </summary>
-    public void TryBond(AtomController trigger, List<AtomController> nearby)
+    public void TryBond(AtomController            trigger,
+                        List<AtomController>      freeNearby,
+                        List<MoleculeInstance>    nearbyMolecules = null)
     {
         if (database == null) return;
 
-        // Build full candidate group (trigger + neighbours).
-        var group = new List<AtomController> { trigger };
-        foreach (var a in nearby)
-            if (!group.Contains(a)) group.Add(a);
+        // Build the free cluster.
+        var freeGroup = new List<AtomController> { trigger };
+        foreach (var a in freeNearby)
+            if (!freeGroup.Contains(a)) freeGroup.Add(a);
 
-        // Count atom types in the cluster.
-        int h = 0, o = 0, c = 0, n = 0;
-        foreach (var a in group)
-            switch (a.atomType)
+        CountAtoms(freeGroup, out int fh, out int fo, out int fc, out int fn);
+        Debug.Log($"[BondManager] TryBond — free atoms: H{fh} O{fo} C{fc} N{fn}");
+
+        // ── 1. Try upgrade with each nearby molecule ───────────────────────────
+        if (nearbyMolecules != null && nearbyMolecules.Count > 0)
+        {
+            MoleculeInstance bestMol      = null;
+            MoleculeRecipe   bestUpgrade  = null;
+            int              bestSize     = 0;
+
+            foreach (var mol in nearbyMolecules)
             {
-                case AtomType.H: h++; break;
-                case AtomType.O: o++; break;
-                case AtomType.C: c++; break;
-                case AtomType.N: n++; break;
+                if (mol == null || mol.Recipe == null) continue;
+
+                // Combined atom counts: free atoms on hand + atoms locked in molecule.
+                int ch = fh + mol.Recipe.hydrogenCount;
+                int co = fo + mol.Recipe.oxygenCount;
+                int cc = fc + mol.Recipe.carbonCount;
+                int cn = fn + mol.Recipe.nitrogenCount;
+
+                var candidate = database.LookupBest(ch, co, cc, cn);
+
+                // Only count it as an upgrade if it is BIGGER than the existing molecule.
+                if (candidate != null &&
+                    candidate.TotalAtoms > mol.Recipe.TotalAtoms &&
+                    candidate.TotalAtoms > bestSize)
+                {
+                    bestMol     = mol;
+                    bestUpgrade = candidate;
+                    bestSize    = candidate.TotalAtoms;
+                }
             }
 
-        Debug.Log($"[BondManager] TryBond cluster → H{h} O{o} C{c} N{n}");
+            if (bestUpgrade != null && bestMol != null)
+            {
+                Debug.Log($"[BondManager] UPGRADE: {bestMol.Recipe.moleculeName} " +
+                          $"→ {bestUpgrade.moleculeName}");
 
-        // ── Greedy: look for the LARGEST recipe the cluster satisfies ──────────
-        // This means if you have H2 + O in range, H2O beats H2.
-        var recipe = database.LookupBest(h, o, c, n);
+                // Collect the reclaimed atoms from the old molecule.
+                var reclaimedAtoms = new List<AtomController>(bestMol.SourceAtoms);
+
+                // Silently break the old molecule (no audio / event — it's being upgraded).
+                BreakMoleculeInstance(bestMol);
+
+                // Build the combined pool: free atoms + reclaimed atoms.
+                var upgradePool = new List<AtomController>(freeGroup);
+                foreach (var a in reclaimedAtoms)
+                    if (!upgradePool.Contains(a)) upgradePool.Add(a);
+
+                // Trim to exactly what the new recipe needs.
+                var upgradeGroup = TrimToRecipe(upgradePool, bestUpgrade);
+
+                CancelPending(trigger);
+                FormMolecule(bestUpgrade, upgradeGroup);
+                return;
+            }
+        }
+
+        // ── 2. Plain bond from free atoms only ────────────────────────────────
+        var recipe = database.LookupBest(fh, fo, fc, fn);
         if (recipe == null)
         {
-            Debug.Log("[BondManager] No matching recipe for this cluster.");
+            Debug.Log("[BondManager] No recipe matches the current cluster.");
             return;
         }
 
-        Debug.Log($"[BondManager] Best recipe found: {recipe.moleculeName} " +
-                  $"(needs H{recipe.hydrogenCount} O{recipe.oxygenCount} " +
-                  $"C{recipe.carbonCount} N{recipe.nitrogenCount})");
+        Debug.Log($"[BondManager] Best free-atom recipe: {recipe.moleculeName}");
+        var recipeGroup = TrimToRecipe(freeGroup, recipe);
 
-        // Trim the group to exactly what the recipe needs.
-        var recipeGroup = TrimToRecipe(group, recipe);
-
-        // ── Does the recipe use ALL atoms in the full cluster? ─────────────────
-        // If yes: bond immediately — we have the perfect set.
-        // If no:  the cluster has MORE atoms than needed by the best recipe
-        //         (e.g. 2 H only, but H2 is the best match and O might come soon).
-        //         Start a pending countdown so the player can add more atoms
-        //         before we lock in the smaller molecule.
-        bool exactFit = recipeGroup.Count == group.Count;
-
+        // If recipe uses all atoms in the cluster → bond immediately.
+        // If it uses fewer → start a pending window (player may add more atoms).
+        bool exactFit = recipeGroup.Count == freeGroup.Count;
         if (exactFit || pendingBondDelay <= 0f)
         {
             CancelPending(trigger);
@@ -102,41 +143,37 @@ public class BondManager : MonoBehaviour
         }
         else
         {
-            // Cancel any existing pending bond for this trigger.
             CancelPending(trigger);
-            var co = StartCoroutine(PendingBond(trigger, recipe, recipeGroup, group));
+            var co = StartCoroutine(PendingBond(trigger, recipe, recipeGroup, freeGroup, nearbyMolecules));
             _pending[trigger] = co;
-            Debug.Log($"[BondManager] Pending '{recipe.moleculeName}' " +
-                      $"— waiting {pendingBondDelay:F1}s for more atoms.");
+            Debug.Log($"[BondManager] Pending '{recipe.moleculeName}' — " +
+                      $"waiting {pendingBondDelay:F1}s for more atoms.");
         }
     }
 
-    /// <summary>Called by AtomController when an atom is grabbed again —
-    /// cancels any pending bond it was part of.</summary>
-    public void CancelPendingForAtom(AtomController atom)
-    {
-        CancelPending(atom);
-    }
+    /// <summary>Cancel any pending bond that involves this atom.</summary>
+    public void CancelPendingForAtom(AtomController atom) => CancelPending(atom);
 
-    // ── Pending bond coroutine ────────────────────────────────────────────────
+    // ── Pending bond ──────────────────────────────────────────────────────────
 
-    private IEnumerator PendingBond(AtomController trigger,
-                                    MoleculeRecipe  smallRecipe,
-                                    List<AtomController> smallGroup,
-                                    List<AtomController> originalCluster)
+    private IEnumerator PendingBond(AtomController         trigger,
+                                    MoleculeRecipe         recipe,
+                                    List<AtomController>   group,
+                                    List<AtomController>   originalCluster,
+                                    List<MoleculeInstance> nearbyMolecules)
     {
         yield return new WaitForSeconds(pendingBondDelay);
         _pending.Remove(trigger);
 
-        // Re-check: any of the atoms grabbed or in a molecule now?
-        foreach (var a in smallGroup)
+        // Bail if any atom was moved or already consumed.
+        foreach (var a in group)
             if (a == null || a.IsGrabbed || a.IsInMolecule) yield break;
 
-        // Re-run the cluster search from trigger to see if new atoms arrived.
-        // Build fresh nearby list by peeking at what's around right now.
-        var refreshedNearby = new List<AtomController>();
-        foreach (var a in smallGroup) if (a != trigger) refreshedNearby.Add(a);
-        TryBond(trigger, refreshedNearby);   // will find best recipe again
+        // Re-run with the same neighbourhood — a fresh TryBond call will
+        // pick up any atoms that arrived during the wait.
+        var refreshNearby = new List<AtomController>(originalCluster);
+        refreshNearby.Remove(trigger);
+        TryBond(trigger, refreshNearby, nearbyMolecules);
     }
 
     // ── Molecule formation ────────────────────────────────────────────────────
@@ -145,7 +182,7 @@ public class BondManager : MonoBehaviour
     {
         if (recipe.moleculePrefab == null)
         {
-            Debug.LogError($"[BondManager] Recipe '{recipe.moleculeName}' has no prefab!");
+            Debug.LogError($"[BondManager] Recipe '{recipe.moleculeName}' has no prefab assigned!");
             return;
         }
 
@@ -156,6 +193,11 @@ public class BondManager : MonoBehaviour
 
         var parent = moleculeSpawnParent != null ? moleculeSpawnParent : transform;
         var mol    = Instantiate(recipe.moleculePrefab, center, Quaternion.identity, parent);
+
+        // Attach MoleculeInstance so AtomController can detect it later for upgrades.
+        var inst        = mol.AddComponent<MoleculeInstance>();
+        inst.Recipe     = recipe;
+        inst.SourceAtoms = new List<AtomController>(atoms);
 
         foreach (var a in atoms)
         {
@@ -174,13 +216,76 @@ public class BondManager : MonoBehaviour
                   (isNew ? " — FIRST DISCOVERY!" : ""));
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Break helpers ─────────────────────────────────────────────────────────
 
     /// <summary>
-    /// From the full group, pick exactly the atoms the recipe needs
-    /// (greedy: first-found per type).
+    /// Silently destroys a specific molecule instance and unlocks its atoms
+    /// for reuse in an upgrade bond. Does NOT fire events or play audio.
     /// </summary>
-    private static List<AtomController> TrimToRecipe(List<AtomController> group,
+    private void BreakMoleculeInstance(MoleculeInstance inst)
+    {
+        if (inst == null) return;
+
+        int idx = _activeMols.IndexOf(inst.gameObject);
+        if (idx >= 0)
+        {
+            _activeMols.RemoveAt(idx);
+            _atomGroups.RemoveAt(idx);
+        }
+
+        // Fully unlock atoms so FormMolecule can re-lock them cleanly.
+        // We call MarkInMolecule(false) which re-enables the grab interactable
+        // and clears IsInMolecule — then FormMolecule re-locks them immediately.
+        // We do NOT call ResetAtom() because that would SetActive(true) and
+        // trigger physics — FormMolecule will handle SetActive(false) itself.
+        foreach (var a in inst.SourceAtoms)
+        {
+            if (a == null) continue;
+            a.MarkInMolecule(false);   // clears flag + re-enables grab
+            // Keep inactive (SetActive stays false) — FormMolecule re-hides them.
+        }
+
+        Destroy(inst.gameObject);
+    }
+
+    public void BreakLastMolecule()
+    {
+        if (_activeMols.Count == 0) return;
+        int i = _activeMols.Count - 1;
+
+        // Re-enable and restore the atoms.
+        foreach (var a in _atomGroups[i]) a.ResetAtom();
+
+        Destroy(_activeMols[i]);
+        _activeMols.RemoveAt(i);
+        _atomGroups.RemoveAt(i);
+
+        OnMoleculeBroken?.Invoke();
+        AudioManager.Instance?.PlayReset();
+    }
+
+    public void BreakAllMolecules()
+    {
+        while (_activeMols.Count > 0) BreakLastMolecule();
+    }
+
+    // ── Atom helpers ──────────────────────────────────────────────────────────
+
+    private static void CountAtoms(List<AtomController> group,
+                                   out int h, out int o, out int c, out int n)
+    {
+        h = o = c = n = 0;
+        foreach (var a in group)
+            switch (a.atomType)
+            {
+                case AtomType.H: h++; break;
+                case AtomType.O: o++; break;
+                case AtomType.C: c++; break;
+                case AtomType.N: n++; break;
+            }
+    }
+
+    private static List<AtomController> TrimToRecipe(List<AtomController> pool,
                                                       MoleculeRecipe recipe)
     {
         int needH = recipe.hydrogenCount;
@@ -189,7 +294,7 @@ public class BondManager : MonoBehaviour
         int needN = recipe.nitrogenCount;
 
         var result = new List<AtomController>();
-        foreach (var a in group)
+        foreach (var a in pool)
         {
             switch (a.atomType)
             {
@@ -209,24 +314,6 @@ public class BondManager : MonoBehaviour
             if (co != null) StopCoroutine(co);
             _pending.Remove(trigger);
         }
-    }
-
-    // ── Break molecules ───────────────────────────────────────────────────────
-
-    public void BreakLastMolecule()
-    {
-        if (_activeMols.Count == 0) return;
-        int i = _activeMols.Count - 1;
-        Destroy(_activeMols[i]); _activeMols.RemoveAt(i);
-        foreach (var a in _atomGroups[i]) a.ResetAtom();
-        _atomGroups.RemoveAt(i);
-        OnMoleculeBroken?.Invoke();
-        AudioManager.Instance?.PlayReset();
-    }
-
-    public void BreakAllMolecules()
-    {
-        while (_activeMols.Count > 0) BreakLastMolecule();
     }
 
     public IReadOnlyCollection<string> DiscoveredMolecules => _discovered;
