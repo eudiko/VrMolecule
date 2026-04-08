@@ -9,22 +9,22 @@ public class UIManager : MonoBehaviour
 
     [Header("Library panel (world-space Canvas)")]
     [SerializeField] private GameObject libraryPanel;
-    [SerializeField] private Transform libraryEntryParent;   // Vertical Layout Group
-    [SerializeField] private GameObject libraryEntryPrefab;   // TMP label prefab
+    [SerializeField] private Transform  libraryEntryParent;
+    [SerializeField] private GameObject libraryEntryPrefab;
 
     [Header("Inspector panel")]
-    [SerializeField] private GameObject inspectorPanel;
+    [SerializeField] private GameObject      inspectorPanel;
     [SerializeField] private TextMeshProUGUI inspectorName;
     [SerializeField] private TextMeshProUGUI inspectorFormula;
     [SerializeField] private TextMeshProUGUI inspectorBond;
 
     [Header("Notification banner")]
-    [SerializeField] private GameObject notificationBanner;
+    [SerializeField] private GameObject      notificationBanner;
     [SerializeField] private TextMeshProUGUI notificationText;
 
     [Header("Panel positioning")]
-    [SerializeField] private Transform playerHead;       // Main Camera
-    [SerializeField] private float panelDistance = 1.5f;
+    [SerializeField] private Transform playerHead;
+    [SerializeField] private float     panelDistance = 1.5f;
 
     private readonly HashSet<string> _shownEntries = new();
 
@@ -38,10 +38,17 @@ public class UIManager : MonoBehaviour
 
     private void Start()
     {
+        if (BondManager.Instance == null)
+        {
+            Debug.LogError("[UIManager] BondManager not found!");
+            return;
+        }
+
         BondManager.Instance.OnMoleculeFormed += ShowMoleculeFormed;
-        libraryPanel.SetActive(true);
-        inspectorPanel.SetActive(false);
-        notificationBanner.SetActive(false);
+
+        if (libraryPanel)       libraryPanel.SetActive(true);
+        if (inspectorPanel)     inspectorPanel.SetActive(false);
+        if (notificationBanner) notificationBanner.SetActive(false);
     }
 
     private void OnDestroy()
@@ -63,13 +70,47 @@ public class UIManager : MonoBehaviour
 
     private void AddToLibrary(MoleculeRecipe recipe)
     {
-        if (!_shownEntries.Add(recipe.formula)) return; // already listed
+        if (!_shownEntries.Add(recipe.formula)) return;
+
+        if (libraryEntryPrefab == null)
+        {
+            Debug.LogError("[UIManager] libraryEntryPrefab is not assigned!");
+            return;
+        }
 
         var entry = Instantiate(libraryEntryPrefab, libraryEntryParent);
-        var label = entry.GetComponent<TextMeshProUGUI>();
-        label.text = $"{recipe.moleculeName}  {recipe.formula}";
 
-        // Animate in
+        // Try root TMP first
+        var rootTMP = entry.GetComponent<TextMeshProUGUI>();
+        if (rootTMP != null)
+        {
+            rootTMP.text = $"{recipe.moleculeName}   {recipe.formula}";
+        }
+        else
+        {
+            // Try named children
+            var allTMP = entry.GetComponentsInChildren<TextMeshProUGUI>(true);
+            if (allTMP.Length == 0)
+            {
+                Debug.LogError("[UIManager] LibraryEntry prefab has no TextMeshProUGUI!");
+                return;
+            }
+
+            foreach (var t in allTMP)
+            {
+                switch (t.name)
+                {
+                    case "MoleculeName": t.text = recipe.moleculeName; break;
+                    case "FormulaLabel": t.text = recipe.formula;      break;
+                    case "BondLabel":    t.text = recipe.bondType;     break;
+                    default:
+                        if (t == allTMP[0])
+                            t.text = $"{recipe.moleculeName}   {recipe.formula}";
+                        break;
+                }
+            }
+        }
+
         entry.transform.localScale = Vector3.zero;
         entry.transform.DOScale(Vector3.one, 0.25f).SetEase(Ease.OutBack);
     }
@@ -78,16 +119,21 @@ public class UIManager : MonoBehaviour
 
     public void ShowInspector(MoleculeRecipe recipe)
     {
-        inspectorName.text = recipe.moleculeName;
-        inspectorFormula.text = recipe.formula;
-        inspectorBond.text = $"Bond: {recipe.bondType}";
+        if (inspectorName    != null) inspectorName.text    = recipe.moleculeName;
+        if (inspectorFormula != null) inspectorFormula.text  = recipe.formula;
+        if (inspectorBond    != null) inspectorBond.text     = $"Bond: {recipe.bondType}";
+
+        if (inspectorPanel == null)
+        {
+            Debug.LogWarning("[UIManager] Inspector panel not assigned!");
+            return;
+        }
 
         inspectorPanel.SetActive(true);
         inspectorPanel.transform.DOScale(Vector3.one, 0.2f)
                                 .From(Vector3.zero)
                                 .SetEase(Ease.OutBack);
 
-        // Auto-hide after 4 seconds
         CancelInvoke(nameof(HideInspector));
         Invoke(nameof(HideInspector), 4f);
     }
@@ -100,6 +146,12 @@ public class UIManager : MonoBehaviour
 
     private void ShowNotification(string msg)
     {
+        if (notificationBanner == null)
+        {
+            Debug.LogWarning("[UIManager] Notification banner not assigned!");
+            return;
+        }
+
         notificationText.text = msg;
         notificationBanner.SetActive(true);
         notificationBanner.transform.DOScale(Vector3.one, 0.2f).From(Vector3.zero);
@@ -112,7 +164,7 @@ public class UIManager : MonoBehaviour
         notificationBanner.transform.DOScale(Vector3.zero, 0.15f)
                                     .OnComplete(() => notificationBanner.SetActive(false));
 
-    // ─── Panel placement (call once on Start) ──────────────────────
+    // ─── Panel placement ───────────────────────────────────────────
 
     public void PlacePanelInFrontOfPlayer(GameObject panel)
     {
