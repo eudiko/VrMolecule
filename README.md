@@ -116,8 +116,6 @@ Assets/
 
 2. **GitHub Copilot** — Used inside the Unity editor for inline code completion, auto-completing switch/case blocks in BondManager.TryBond, generating XML doc comments, and boilerplate event subscription patterns.
 
-3. **Meshy.ai** — Used to generate initial 3D atom sphere mesh assets and simple molecule geometry as a starting point for building prefabs.
-
 ---
 
 ## Testing Without a Headset
