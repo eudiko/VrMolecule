@@ -1,0 +1,78 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f8ef1b888ec165844907ecc1c23fba9c, type: 3}
+  m_Name: MoleculeDB
+  m_EditorClassIdentifier: Assembly-CSharp::MoleculeDatabase
+  recipes:
+  - moleculeName: Water
+    formula: "H\u2082O"
+    bondType: Covalent
+    moleculePrefab: {fileID: 5197556371347734920, guid: c384e9c2894505045abba2d59d4a3fde, type: 3}
+    successSound: {fileID: 8300000, guid: 283de29da9c09ba489ac88b27ea94ecb, type: 3}
+    hydrogenCount: 2
+    oxygenCount: 1
+    carbonCount: 0
+    nitrogenCount: 0
+  - moleculeName: Hydrogen Gas
+    formula: "H\u2082"
+    bondType: Single Covalent
+    moleculePrefab: {fileID: 4062808408134685761, guid: d5a9c4549f844774b89c221ad092cc19, type: 3}
+    successSound: {fileID: 8300000, guid: 283de29da9c09ba489ac88b27ea94ecb, type: 3}
+    hydrogenCount: 2
+    oxygenCount: 0
+    carbonCount: 0
+    nitrogenCount: 0
+  - moleculeName: Oxygen Gas
+    formula: "O\u2082"
+    bondType: Double Covalent
+    moleculePrefab: {fileID: 2733095811238152315, guid: 0f55adae13d117c41889dd9099188417, type: 3}
+    successSound: {fileID: 8300000, guid: 283de29da9c09ba489ac88b27ea94ecb, type: 3}
+    hydrogenCount: 0
+    oxygenCount: 2
+    carbonCount: 0
+    nitrogenCount: 0
+  - moleculeName: Nitrogen Gas
+    formula: "N\u2082"
+    bondType: Triple Covalent
+    moleculePrefab: {fileID: 7787380351156029880, guid: 4261f26e670996c40a450c2c88aa18f8, type: 3}
+    successSound: {fileID: 8300000, guid: 283de29da9c09ba489ac88b27ea94ecb, type: 3}
+    hydrogenCount: 0
+    oxygenCount: 0
+    carbonCount: 0
+    nitrogenCount: 2
+  - moleculeName: Ammonia
+    formula: "NH\u2083"
+    bondType: Covalent
+    moleculePrefab: {fileID: 3114402379368558517, guid: 0b58fef84e42952419c72064159269ee, type: 3}
+    successSound: {fileID: 8300000, guid: 283de29da9c09ba489ac88b27ea94ecb, type: 3}
+    hydrogenCount: 3
+    oxygenCount: 0
+    carbonCount: 0
+    nitrogenCount: 1
+  - moleculeName: Carbon Dioxide
+    formula: "CO\u2082"
+    bondType: Double Covalent
+    moleculePrefab: {fileID: 4660614826367458572, guid: 3b748a24a9753674190fd86b59d7974b, type: 3}
+    successSound: {fileID: 8300000, guid: 283de29da9c09ba489ac88b27ea94ecb, type: 3}
+    hydrogenCount: 0
+    oxygenCount: 2
+    carbonCount: 1
+    nitrogenCount: 0
+  - moleculeName: Methane
+    formula: "CH\u2084"
+    bondType: Covalent
+    moleculePrefab: {fileID: 1271574541750059302, guid: 3166fe52e963fbb41a7515c4e1b5cf6f, type: 3}
+    successSound: {fileID: 8300000, guid: 283de29da9c09ba489ac88b27ea94ecb, type: 3}
+    hydrogenCount: 4
+    oxygenCount: 0
+    carbonCount: 1
+    nitrogenCount: 0
